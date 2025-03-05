@@ -3,6 +3,8 @@ import gdown
 import os
 import zipfile
 import pandas as pd
+import numpy as np
+from sklearn.neighbors import NearestNeighbors  # Replace Annoy import
 
 #############################
 # 1. CONSTANTS & URL
@@ -88,17 +90,70 @@ def build_user_movie_matrix(ratings: pd.DataFrame):
     matrix = ratings.pivot_table(index="userId", columns="movieId", values="rating").fillna(0)
     return matrix
 
+@st.cache
+def prepare_knn_data(user_movie_matrix):
+    """
+    Prepare data for k-NN based recommendations using scikit-learn.
+    """
+    # Calculate user means and normalize the matrix
+    user_means = user_movie_matrix.mean(axis=1)
+    normalized_matrix = user_movie_matrix.sub(user_means, axis=0)
+    
+    # Build kNN model
+    knn = NearestNeighbors(n_neighbors=11, metric='euclidean')  # 11 because we'll remove the user itself
+    knn.fit(normalized_matrix)
+    
+    return knn, normalized_matrix
+
 #############################
-# 3. MODEL / RECOMMENDATION DUMMIES
+# 3. MODEL / RECOMMENDATION
 #############################
 
-def recommend_movies_annoy(user_id: int, user_movie_matrix: pd.DataFrame, num_recommendations=5):
+def recommend_movies_knn(user_id: int, user_movie_matrix: pd.DataFrame, movies_df: pd.DataFrame, num_recommendations=5):
     """
-    Replace with your actual Annoy-based recommendation logic.
-    For now, return dummy movie titles.
+    Get movie recommendations using scikit-learn k-NN approach.
     """
-    # e.g., find neighbors, filter out seen items, etc.
-    return [f"AnnoyMovie_{i}" for i in range(1, num_recommendations+1)]
+    # Prepare data
+    knn, normalized_matrix = prepare_knn_data(user_movie_matrix)
+    
+    try:
+        user_index = normalized_matrix.index.get_loc(user_id)
+    except KeyError:
+        return []
+    
+    # Get the target user's normalized vector
+    user_vector = normalized_matrix.iloc[user_index].to_numpy().reshape(1, -1)
+    
+    # Get nearest neighbors
+    distances, indices = knn.kneighbors(user_vector)
+    
+    # Remove the user itself (first result)
+    neighbor_indices = indices[0][1:]
+    distances = distances[0][1:]
+    
+    # Calculate recommendations
+    recommended_scores = {}
+    for neighbor_idx, dist in zip(neighbor_indices, distances):
+        similarity = 1 / (1 + dist)
+        neighbor_ratings = normalized_matrix.iloc[neighbor_idx]
+        for movie, rating in neighbor_ratings.items():
+            if rating != 0:
+                recommended_scores[movie] = recommended_scores.get(movie, 0) + similarity * rating
+    
+    # Filter out movies the user has already rated
+    already_rated = set(user_movie_matrix.loc[user_id][user_movie_matrix.loc[user_id] > 0].index)
+    filtered_scores = {movie: score for movie, score in recommended_scores.items() if movie not in already_rated}
+    
+    # Get top recommendations
+    recommended_movies = sorted(filtered_scores, key=filtered_scores.get, reverse=True)[:num_recommendations]
+    
+    # Convert movie IDs to titles
+    movie_titles = []
+    for movie_id in recommended_movies:
+        title = movies_df[movies_df['movieId'] == movie_id]['title'].iloc[0]
+        movie_titles.append(title)
+    
+    return movie_titles
 
 def recommend_movies_svd(user_id: int, user_movie_matrix: pd.DataFrame, num_recommendations=5):
     """
@@ -130,14 +185,14 @@ def main():
     
     # 4.4 UI for user ID and model selection
     user_id_input = st.text_input("Enter User ID:", "10")
-    model_choice = st.selectbox("Choose Recommendation Model", ("Annoy-based", "SVD-based"))
+    model_choice = st.selectbox("Choose Recommendation Model", ("KNN-based", "SVD-based"))
     
     if st.button("Get Recommendations"):
         try:
             user_id = int(user_id_input)
             
-            if model_choice == "Annoy-based":
-                recs = recommend_movies_annoy(user_id, user_movie_matrix)
+            if model_choice == "KNN-based":
+                recs = recommend_movies_knn(user_id, user_movie_matrix, movies)
             else:
                 recs = recommend_movies_svd(user_id, user_movie_matrix)
             
