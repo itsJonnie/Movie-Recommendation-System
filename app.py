@@ -4,7 +4,9 @@ import os
 import zipfile
 import pandas as pd
 import numpy as np
-from sklearn.neighbors import NearestNeighbors  # Replace Annoy import
+from sklearn.neighbors import NearestNeighbors
+from sklearn.decomposition import TruncatedSVD
+from scipy.sparse.linalg import svds
 
 #############################
 # 1. CONSTANTS & URL
@@ -155,51 +157,123 @@ def recommend_movies_knn(user_id: int, user_movie_matrix: pd.DataFrame, movies_d
     
     return movie_titles
 
-def recommend_movies_svd(user_id: int, user_movie_matrix: pd.DataFrame, num_recommendations=5):
+def recommend_movies_svd(user_id: int, user_movie_matrix: pd.DataFrame, movies_df: pd.DataFrame, num_recommendations=5):
     """
-    Replace with your actual SVD-based recommendation logic.
-    For now, return dummy movie titles.
+    Recommend movies for a given user based on SVD-predicted ratings.
     """
-    return [f"SVDMovie_{i}" for i in range(1, num_recommendations+1)]
+    try:
+        # Convert the rating matrix to a numpy array
+        ratings_matrix = user_movie_matrix.to_numpy()
+        
+        # Perform SVD
+        U, sigma, Vt = svds(ratings_matrix, k=50)
+        
+        # Convert diagonal array to matrix
+        sigma = np.diag(sigma)
+        
+        # Calculate predicted ratings
+        predicted_ratings = np.dot(np.dot(U, sigma), Vt)
+        predicted_ratings_df = pd.DataFrame(predicted_ratings, 
+                                          columns=user_movie_matrix.columns,
+                                          index=user_movie_matrix.index)
+        
+        # Get predicted ratings for the target user
+        user_pred = predicted_ratings_df.loc[user_id]
+        
+        # Identify movies already rated by the user
+        already_rated = set(user_movie_matrix.loc[user_id][user_movie_matrix.loc[user_id] > 0].index)
+        
+        # Filter out movies already rated
+        user_pred_filtered = user_pred.drop(already_rated, errors='ignore')
+        
+        # Get top movie IDs
+        recommended_movies = user_pred_filtered.sort_values(ascending=False).head(num_recommendations).index.tolist()
+        
+        # Convert movie IDs to titles
+        movie_titles = []
+        for movie_id in recommended_movies:
+            title = movies_df[movies_df['movieId'] == movie_id]['title'].iloc[0]
+            movie_titles.append(title)
+        
+        return movie_titles
+        
+    except Exception as e:
+        st.error(f"Error in SVD recommendations: {str(e)}")
+        return []
 
 #############################
 # 4. STREAMLIT UI
 #############################
 
 def main():
-    st.title("Movie Recommendation System (ML-100k)")
+    st.title("🎬 Movie Recommendation System")
+    st.markdown("---")
 
     # 4.1 Load data
-    st.write("Loading data from Google Drive if necessary...")
-    ratings, movies = load_data()
+    with st.spinner('Loading data from Google Drive if necessary...'):
+        ratings, movies = load_data()
+        user_movie_matrix = build_user_movie_matrix(ratings)
+
+    # Get min and max user IDs
+    min_user_id = int(ratings['userId'].min())
+    max_user_id = int(ratings['userId'].max())
     
-    # 4.2 Build user–movie matrix
-    user_movie_matrix = build_user_movie_matrix(ratings)
+    # Create sidebar for controls
+    st.sidebar.header("📊 Configuration")
     
-    # 4.3 Quick preview (optional)
-    if st.checkbox("Show data samples"):
-        st.write("Ratings sample:")
-        st.write(ratings.head())
-        st.write("Movies sample:")
-        st.write(movies.head())
+    # Replace text input with slider
+    user_id = st.sidebar.slider(
+        "Select User ID",
+        min_value=min_user_id,
+        max_value=max_user_id,
+        value=10,
+        help="Choose a user ID between {} and {}".format(min_user_id, max_user_id)
+    )
     
-    # 4.4 UI for user ID and model selection
-    user_id_input = st.text_input("Enter User ID:", "10")
-    model_choice = st.selectbox("Choose Recommendation Model", ("KNN-based", "SVD-based"))
+    model_choice = st.sidebar.selectbox(
+        "Choose Recommendation Model",
+        ("KNN-based", "SVD-based"),
+        help="KNN uses neighbor similarity, SVD uses matrix factorization"
+    )
+
+    # Optional data preview in expander
+    with st.expander("👀 Preview Data"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Ratings sample:")
+            st.dataframe(ratings.head(), width=None)  # Changed from use_container_width
+        with col2:
+            st.write("Movies sample:")
+            st.dataframe(movies.head(), width=None)   # Changed from use_container_width
+
+    # Add some user statistics
+    st.markdown("### 📈 User Statistics")
+    user_ratings = ratings[ratings['userId'] == user_id]
+    col1, col2, col3 = st.columns(3)
     
-    if st.button("Get Recommendations"):
-        try:
-            user_id = int(user_id_input)
-            
+    with col1:
+        st.metric("Total Ratings", len(user_ratings))
+    with col2:
+        avg_rating = round(user_ratings['rating'].mean(), 2)
+        st.metric("Average Rating", avg_rating)
+    with col3:
+        unique_movies = len(user_ratings['movieId'].unique())
+        st.metric("Movies Rated", unique_movies)
+
+    # Get recommendations
+    if st.button("🎯 Get Recommendations"):
+        with st.spinner('Finding the best movies for you...'):
             if model_choice == "KNN-based":
                 recs = recommend_movies_knn(user_id, user_movie_matrix, movies)
             else:
-                recs = recommend_movies_svd(user_id, user_movie_matrix)
+                recs = recommend_movies_svd(user_id, user_movie_matrix, movies)
             
-            st.write(f"Recommendations for User {user_id} using {model_choice}:")
-            st.write(recs)
-        except ValueError:
-            st.error("Please enter a valid numeric User ID.")
+            st.markdown(f"### 🎥 Top Recommendations for User {user_id}")
+            st.markdown(f"*Using {model_choice} approach*")
+            
+            # Display recommendations in a nice format
+            for i, movie in enumerate(recs, 1):
+                st.markdown(f"**{i}.** {movie}")
 
 if __name__ == "__main__":
     main()
